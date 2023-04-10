@@ -1,0 +1,286 @@
+#Setup libraries for doing cluster analysis
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(factoextra)
+library(cluster)
+library(dplyr)
+library(psych)
+library(psychTools)
+library(readxl)
+library(knitr)
+library(kableExtra)
+```
+#Load dataset
+```{r}
+df<-read_excel("loan_data.xlsx")
+df_cols <- colnames(df)
+set.seed(123)
+```
+#Load data dictionary 
+```{r}
+data_dict<-read_excel("Loan_data_dictionary.xlsx")
+data_dict <- data_dict[data_dict$LoanStatNew %in% df_cols,]
+missing_from_data_dict <- setdiff(df_cols,data_dict$LoanStatNew)
+missing_from_data_dict
+data_dict[nrow(data_dict) + 1,] = list(missing_from_data_dict[1],"Total revolving credit")
+data_dict[nrow(data_dict) + 1,] = list(missing_from_data_dict[2],"Is the loan bad?")
+new_dict_order <- as.data.frame(data_dict$LoanStatNew[order(match(data_dict$LoanStatNew,df_cols))])
+colnames(new_dict_order) <- c("Variable")
+colnames(data_dict) <- c("Variable", "Description")
+new_data_dict <- left_join(new_dict_order,data_dict,by = "Variable")
+kable(new_data_dict, format = "html", col.names = c("Variable Name", "Description"), caption= "Data Dictionary")%>%
+  kable_styling(bootstrap_options = c("bordered"))
+```
+#Looking at the Data
+```{r}
+describe(df)
+```
+```{r}
+headTail(df)
+```
+```{r}
+#Checking Structure
+str(df)
+#Checking Summary
+summary(df)
+#Checking for NA's
+as.data.frame(colSums(is.na(df)))
+#Removing duplicate rows
+df<- distinct(df)
+```
+
+Cleaning Data - NAs
+```{r}
+#counting NA's in sample
+df_NAs <- as.data.frame(colSums(is.na(df)))
+df_NAs$Perc_NA <- (df_NAs[,1]/nrow(df))*100
+#variables with more than 0% NA
+df_NAs <- df_NAs[df_NAs$Perc_NA > 0,]
+#dropping columns that are more than 20% NA
+drop_cols <- rownames(df_NAs[df_NAs$Perc_NA > 20,])
+drop_cols
+df <- df[,!(colnames(df) %in% drop_cols)]
+#dropping remaining rows that contain NA values
+df <- na.omit(df)
+```
+Removing columns that are not informative
+```{r}
+df$id <- NULL
+df$member_id <- NULL
+```
+```{r}
+df$grade <- as.factor(df$grade)
+levels(df$grade) <- list("1"="A", "2"="B", "3" = "C", "4" = "D", "5" = "E", "6" = "F", "7" = "G")
+df$grade <- as.numeric(df$grade)
+
+```
+Taking sample
+```{r}
+#ensuring randomness in the data 
+df <- df[sample(1:nrow(df)), ]
+#taking sample of 500
+df_sample <- sample_n(df, 500)
+#Describe sample
+describe(df_sample)
+```
+Keep only numeric columns
+```{r}
+df_sample$loan_is_bad <- ifelse(df_sample$loan_is_bad == FALSE, 0,1)
+df_sample_num <- df_sample %>%
+  select(where(is.numeric), "loan_is_bad")
+```
+Looking at collinearity
+```{r}
+cor_matrix <- cor(df_sample_num)
+df_sample_num$collections_12_mths_ex_med <- NULL
+df_sample_num$policy_code <- NULL
+cor_matrix2 <- cor(df_sample_num)
+cor_matrix2<- round(cor_matrix2, 2)
+lowerCor(df_sample_num)
+```
+```{r}
+#Removing NA's in Corr
+df_sample_num$acc_now_delinq <- NULL
+lowerCor(df_sample_num)
+cols_to_keep <- c("loan_amnt","term","int_rate","annual_inc","dti","delinq_2yrs","inq_last_6mths",
+                  "open_acc","pub_rec","revol_bal",'revol_util', 'loan_is_bad')
+df_sample_num <- df_sample_num %>% select(all_of(cols_to_keep))
+lowerCor(df_sample_num)
+```
+Outlier detection  using mahalanobis distance 
+```{r}
+df_sample_num$MahaD <- mahalanobis(df_sample_num,colMeans(df_sample_num),cov(df_sample_num))
+```
+```{r}
+df_sample_num$Maha_P <- pchisq(df_sample_num$MahaD, df=(ncol(df_sample_num)-1), lower.tail=FALSE)
+df_sample_num$outlier <- "No"
+df_sample_num$outlier[df_sample_num$Maha_P < 0.001] <- "Yes"
+
+#keep loan is bad for later
+bad_loans <- df_sample_num$loan_is_bad
+#remove outliers
+df_sample_num <- df_sample_num %>%
+  filter(outlier == "No") %>%
+  select(-c("MahaD", "Maha_P", "outlier"))
+bad_loans <- df_sample_num$loan_is_bad
+
+df_sample_num <- df_sample_num %>%
+  select(-c("loan_is_bad"))
+```
+
+Checking data again
+```{r}
+lowerCor(df_sample_num)
+```
+#Standardise data
+```{r}
+df_sample_num<-as.data.frame(scale(df_sample_num))
+```
+Testing if suitable for factor analysis
+```{r}
+KMO(df_sample_num)
+cortest.bartlett(df_sample_num)
+```
+# Doing PCA
+```{r}
+pcModel<-principal(df_sample_num, 11, rotate="none")
+print(pcModel)
+```
+```{r}
+print.psych(pcModel, cut=0.3, sort=TRUE)
+```
+```{r}
+plot(pcModel$values, type="b")
+```
+#Factor analysis with ML
+
+```{r}
+FA<-(fa(df_sample_num,4, n.obs=nrow(df_sample_num), rotate="none", fm="ml"))
+print(FA, cut=0.3,sort="TRUE")
+fa.diagram(FA)
+```
+#Factor analysis with Oblimin 
+```{r}
+FA_Obl<-(fa(df_sample_num,4, n.obs=nrow(df_sample_num), rotate="oblimin", fm="ml"))
+print(FA_Obl, cut=0.3,sort="TRUE")
+fa.diagram(FA_Obl)
+```
+#Factor analysis with Varimax 
+```{r}
+FA_Vm<-(fa(df_sample_num,4, n.obs=nrow(df_sample_num), rotate="Varimax", fm="ml"))
+print(FA_Vm, cut=0.3,sort="TRUE")
+fa.diagram(FA_Vm)
+```
+#PCA
+```{r}
+pc_model<-principal(df_sample_num,4, rotate="none")
+print.psych(pc_model, cut=0.3, sort=TRUE)
+plot(pc_model$values, type="b")
+
+```
+#PC Factor Analysis - Oblimin
+```{r}
+pc_model_obl <- principal(df_sample_num, 4, rotate="oblimin")
+print.psych(pc_model_obl, cut=0.3, sort=TRUE)
+```
+#PC Factor Analysis - Quartimax
+```{r}
+pc_model_q <- principal(df_sample_num, 4, rotate="quartimax")
+print.psych(pc_model_q, cut=0.3, sort=TRUE)
+
+```
+#Factor analysis
+```{r}
+#choosing oblimin rotation with 4 factors
+pc_model_obl <- principal(df_sample_num, 4, rotate="oblimin",scores=TRUE)
+fscores <- pc_model_obl$scores
+```
+```{r}
+describe(fscores)
+```
+```{r}
+headTail(fscores)
+```
+```{r}
+FscoresMatrix<-cor(fscores)
+print(FscoresMatrix)
+```
+```{r}
+round(FscoresMatrix, 2)
+```
+```{r}
+lowerCor(fscores)
+```
+#Cluster Analysis
+Define linkage methods
+```{r}
+m <- c( "average", "single", "complete", "ward")
+names(m) <- c( "average", "single", "complete", "ward")
+```
+```{r}
+#Function to compute agglomerative coefficient
+ac <- function(x) {
+  agnes(df_sample_num, method = x)$ac
+}
+```
+Calculate agglomerative coefficient for each clustering linkage method
+```{r}
+# agglomerative coefficient for all clustering methods
+sapply(m, ac)
+```
+We should choose Ward’s minimum variance method as it produces the highest agglomerative coefficient
+```{r}
+gap_stat_h <- clusGap(df_sample_num, FUN = hcut, nstart = 25, K.max = 10, B = 50)
+gap_stat_k <- clusGap(df_sample_num, FUN = kmeans, nstart = 25, K.max = 10, B = 50)
+```
+produce plot of clusters vs. gap statistic
+```{r}
+fviz_gap_stat(gap_stat_h)
+fviz_gap_stat(gap_stat_k)
+```
+From the plot we can see that the gap statistic is high at  k = 10
+Finding distance matrix
+```{r}
+distance_mat <- dist(df_sample_num, method = 'euclidean')
+```
+Fitting HC Model to dataset
+```{r}
+set.seed(240)  # Setting seed
+Hierar_cl <- hclust(distance_mat, method = "ward")
+Hierar_cl
+```
+Plotting dendrogram
+```{r}
+plot(Hierar_cl)
+```
+Cut tree by number of clusters
+```{r}
+fit <- cutree(Hierar_cl, k =10)
+fit
+```
+Find observations in each cluster
+```{r}
+table(fit)
+```
+Append cluster labels to original data
+```{r}
+final_data <-cbind(df_sample_num, cluster = fit)
+```
+```{r}
+head(final_data)
+```
+```{r}
+df_clust <-as.data.frame(cbind(cluster = fit, loan_is_bad = bad_loans))
+```
+```{r}
+#Summary stats
+cluster_loans <- df_clust %>%
+  group_by(cluster)%>%
+  summarise(count_bad_loans = sum(loan_is_bad), total_in_cluster = n(), perc_bad = count_bad_loans/total_in_cluster)
+
+cluster_loans
+```
+
+
+
